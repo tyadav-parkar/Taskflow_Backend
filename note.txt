@@ -1,0 +1,104 @@
+npm install -D typescript
+npm install -D ts-node
+npm i nodemon
+
+then create tsconfig.json-
+{
+    "compilerOptions": {
+        "module": "NodeNext",
+        "moduleResolution": "NodeNext",
+        "baseUrl": "src",
+        "outDir": "dist",
+        "sourceMap": true,
+        "noImplicitAny": true,
+    },
+    "include": ["src/**/*"],
+}
+
+
+package.json-
+{
+  "name": "project_management_app",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start":"nodemon"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "nodemon": "^3.1.11"
+  }
+}
+
+
+create nodemon.json-
+{
+    "watch":["src"],
+    "ext":".ts,.js",
+    "exec":"ts-node ./src/index.ts"
+}
+
+npm install @types/express --save-dev
+npm install -D @types/express @types/node
+
+
+
+
+
+The -D flag in npm install stands for --save-dev, which means you are installing the package as a development dependency.
+What does that mean?
+
+Development dependencies are packages needed only during development, not in production.
+Examples: TypeScript, linters, testing frameworks, build tools.
+They go under "devDependencies" in your package.json.
+
+
+ 1. TypeScript is a development-time tool
+
+TypeScript adds static type checking and compile-time safety.
+It helps developers catch errors before running the code.
+But browsers and Node.js cannot execute TypeScript directly — they only understand JavaScript.
+
+✅ 2. Production runs compiled JavaScript
+
+When you build your app (tsc), TypeScript compiles .ts files into .js.
+The compiled JavaScript is what actually runs in production.
+So, the TypeScript compiler (typescript package) is only needed during development/build.
+
+✅ 3. Why keep it as devDependency?
+
+In production, you typically deploy the dist/ folder (compiled JS), not the source .ts files.
+Keeping TypeScript as a dev dependency reduces the size of your production environment and avoids unnecessary packages.
+
+
+When would you need TypeScript in production?
+
+If you compile on the fly (e.g., using ts-node in production), then you need TypeScript installed.
+This is rare because it adds overhead and is not recommended for performance reasons.
+
+
+
+
+
+ts-node-
+ts-node is a tool that allows you to run TypeScript files directly in Node.js without compiling them to JavaScript first.
+✅ What does it do?
+
+Normally, Node.js only understands JavaScript.
+With ts-node, you can execute .ts files as if they were .js files.
+It uses the TypeScript compiler internally to transpile code on the fly.
+
+
+✅ Why use ts-node?
+
+Faster development: No need to run tsc every time you make changes.
+Great for scripts, quick testing, and development environments.
