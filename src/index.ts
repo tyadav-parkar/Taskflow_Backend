@@ -8,7 +8,7 @@ app.get("/", (_req: Request, res: Response) => {
 //   res.json({msg: "server is running"});
   res.send("ok");
 });
-
+// Learning Branching 
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
 });
