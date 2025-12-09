@@ -1,6 +1,6 @@
 import mongoose from "mongoose";
 const connectDB=async():Promise<void>=>{
-    await mongoose.connect(`${process.env.MONGODB_URL}/taskflow`)
+    await mongoose.connect(`${process.env.MONGODB_URL}/Demo1`)
     .then(()=>{
         console.log("DB Connected")
     }).catch((error)=>{
