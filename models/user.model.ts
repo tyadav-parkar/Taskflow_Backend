@@ -31,7 +31,7 @@ const userSchema = new Schema<UserDocument>({
     type: String,
     required: function(this: UserDocument) {
       return !this.isGoogleAuth;
-    },
+    },  
   },
   googleId: {
     type: String,

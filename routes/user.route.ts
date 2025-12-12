@@ -1,3 +1,4 @@
+// src/routes/user.route.ts
 import express from 'express';
 import {
     registerUser,

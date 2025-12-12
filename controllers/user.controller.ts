@@ -51,7 +51,7 @@ const generateOTP = (): string => {
     return Math.floor(100000 + Math.random() * 900000).toString();
 };
 
-// MODIFIED: Register User - No longer creates token immediately
+// Register User
 export const registerUser = async (req: Request, res: Response): Promise<void> => {
     try {
         const { name, email, password } = req.body as {
@@ -88,7 +88,6 @@ export const registerUser = async (req: Request, res: Response): Promise<void> =
                 return;
             }
             
-            // Check if email is not verified
             if (!existingUser.emailVerified) {
                 res.status(409).json({ 
                     success: false, 
@@ -111,9 +110,9 @@ export const registerUser = async (req: Request, res: Response): Promise<void> =
 
         // Generate OTP
         const verificationToken = generateOTP();
-        const verificationTokenExpiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+        const verificationTokenExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
-        // Create user (NOT verified yet)
+        // Create user
         const user = await User.create({ 
             name, 
             email: email.toLowerCase(), 
@@ -133,7 +132,6 @@ export const registerUser = async (req: Request, res: Response): Promise<void> =
             return;
         }
 
-        // Send response WITHOUT token (user must verify first)
         res.status(201).json({
             success: true,
             message: "Registration successful! Please check your email for verification code.",
@@ -152,7 +150,7 @@ export const registerUser = async (req: Request, res: Response): Promise<void> =
     }
 };
 
-// NEW: Verify Email with OTP
+// Verify Email with OTP
 export const verifyEmail = async (req: Request, res: Response): Promise<void> => {
     try {
         const { email, code } = req.body as { email?: string; code?: string };
@@ -162,10 +160,9 @@ export const verifyEmail = async (req: Request, res: Response): Promise<void> =>
             return;
         }
 
-        // Find user
+        // Find user by email first
         const user = await User.findOne({
             email: email.toLowerCase(),
-            verificationToken: code,
             verificationTokenExpiresAt: { $gt: Date.now() }
         });
 
@@ -186,6 +183,20 @@ export const verifyEmail = async (req: Request, res: Response): Promise<void> =>
             return;
         }
 
+        // Verify the code
+        if (user.verificationToken !== code) {
+            // Increment failed attempts
+            user.otpAttempts += 1;
+            await user.save();
+            
+            const attemptsLeft = 5 - user.otpAttempts;
+            res.status(400).json({ 
+                success: false, 
+                message: `Invalid verification code. ${attemptsLeft} attempt${attemptsLeft !== 1 ? 's' : ''} remaining.` 
+            });
+            return;
+        }
+
         // Mark as verified
         user.emailVerified = true;
         user.verificationToken = undefined;
@@ -193,10 +204,12 @@ export const verifyEmail = async (req: Request, res: Response): Promise<void> =>
         user.otpAttempts = 0;
         await user.save();
 
-        // Send welcome email
-        await sendWelcomeEmail(user.email, user.name);
+        // Send welcome email (non-blocking)
+        sendWelcomeEmail(user.email, user.name).catch(err => 
+            console.error("Failed to send welcome email:", err)
+        );
 
-        // Generate JWT token NOW
+        // Generate JWT token
         const token = createToken(user._id.toString());
 
         res.status(200).json({
@@ -222,7 +235,7 @@ export const verifyEmail = async (req: Request, res: Response): Promise<void> =>
     }
 };
 
-// NEW: Resend OTP
+// Resend OTP
 export const resendOTP = async (req: Request, res: Response): Promise<void> => {
     try {
         const { email } = req.body as { email?: string };
@@ -250,7 +263,7 @@ export const resendOTP = async (req: Request, res: Response): Promise<void> => {
 
         user.verificationToken = verificationToken;
         user.verificationTokenExpiresAt = verificationTokenExpiresAt;
-        user.otpAttempts = 0;
+        user.otpAttempts = 0; // Reset attempts on resend
         await user.save();
 
         // Send OTP email
@@ -276,7 +289,7 @@ export const resendOTP = async (req: Request, res: Response): Promise<void> => {
     }
 };
 
-// MODIFIED: Login User - Check email verification
+// Login User
 export const loginUser = async (req: Request, res: Response): Promise<void> => {
     try {
         const { email, password } = req.body as { email?: string; password?: string };
@@ -312,7 +325,7 @@ export const loginUser = async (req: Request, res: Response): Promise<void> => {
             return;
         }
 
-        // CHECK: Email verification
+        // Check email verification
         if (!user.emailVerified) {
             res.status(403).json({ 
                 success: false, 
@@ -347,7 +360,7 @@ export const loginUser = async (req: Request, res: Response): Promise<void> => {
     }
 };
 
-// Google Auth remains the same but marks email as verified
+// Google Auth
 export const googleAuth = async (req: Request, res: Response): Promise<void> => {
     try {
         const { code } = req.body;
@@ -387,10 +400,11 @@ export const googleAuth = async (req: Request, res: Response): Promise<void> => 
         let user = await User.findOne({ email: email.toLowerCase() });
 
         if (user) {
+            // Update existing user with Google auth
             if (!user.isGoogleAuth && user.password) {
                 user.googleId = googleId;
                 user.isGoogleAuth = true;
-                user.emailVerified = true; // Google emails are verified
+                user.emailVerified = true;
                 if (picture) user.picture = picture;
                 await user.save();
             } else if (user.isGoogleAuth && !user.googleId) {
@@ -398,15 +412,22 @@ export const googleAuth = async (req: Request, res: Response): Promise<void> => 
                 user.emailVerified = true;
                 if (picture) user.picture = picture;
                 await user.save();
+            } else if (user.isGoogleAuth) {
+                // Just update picture if needed
+                if (picture && user.picture !== picture) {
+                    user.picture = picture;
+                    await user.save();
+                }
             }
         } else {
+            // Create new user with Google auth
             user = await User.create({
                 name,
                 email: email.toLowerCase(),
                 googleId,
                 picture,
                 isGoogleAuth: true,
-                emailVerified: true, // Google emails are pre-verified
+                emailVerified: true,
             });
         }
 
@@ -435,6 +456,7 @@ export const googleAuth = async (req: Request, res: Response): Promise<void> => 
     }
 };
 
+// Get Current User
 export const getCurrentUser = async (req: Request, res: Response): Promise<void> => {
     try {
         const userId = req.user?.id;
