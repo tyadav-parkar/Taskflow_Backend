@@ -3,170 +3,472 @@ import User from "../models/user.model.js";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import validator from "validator";
+import axios from "axios";
+import dotenv from 'dotenv';
+import { sendVerificationEmail, sendWelcomeEmail } from '../utils/email.service.js';
 
-const JWT_SECRET: string = process.env.JWT_SECRET || "your_jwt_secret_here";
+dotenv.config();
+
+const JWT_SECRET: string = process.env.JWT_SECRET!;
 const TOKEN_EXPIRES = "24h";
+const SALT = Number(process.env.SALT);
 
-const createToken = (userId: string): string =>
-    jwt.sign({ id: userId }, JWT_SECRET, { expiresIn: TOKEN_EXPIRES });
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID!;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET!;
+const GOOGLE_REDIRECT_URI = "postmessage";
 
-export const registerUser = async (req: Request, res: Response): Promise<void> => {
-    const { name, email, password } = req.body as {
-        name?: string;
-        email?: string;
-        password?: string;
-    };
+interface GoogleTokenResponse {
+    access_token: string;
+    expires_in: number;
+    token_type: string;
+    scope: string;
+    refresh_token?: string;
+}
 
-    if (!name || !email || !password) {
-        res.status(400).json({ success: false, message: "All fields are required." });
-        return;
-    }
-    if (!validator.isEmail(email)) {
-        res.status(400).json({ success: false, message: "Invalid email." });
-        return;
-    }
-    if ((password?.length ?? 0) < 8) {
-        res.status(400).json({ success: false, message: "Password must be at least 8 characters." });
-        return;
-    }
+interface GoogleUserInfo {
+    id: string;
+    email: string;
+    verified_email: boolean;
+    name: string;
+    given_name: string;
+    family_name: string;
+    picture: string;
+    locale: string;
+}
 
+const createToken = (userId: string): string => {
     try {
-        if (await User.findOne({ email })) {
-            res.status(409).json({ success: false, message: "User already exists." });
-            return;
-        }
-
-        const hashed = await bcrypt.hash(password, 10);
-        const user: any = await User.create({ name, email, password: hashed });
-        const token = createToken(user._id as string);
-
-        res.status(201).json({ success: true, token, user: { id: user._id as string, name: user.name as string, email: user.email as string }, });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ success: false, message: "Server error." });
+        const token = jwt.sign({ id: userId }, JWT_SECRET, { expiresIn: TOKEN_EXPIRES });
+        return token;
+    } catch (error) {
+        console.error("Error creating token:", error);
+        throw error;
     }
 };
 
-export const loginUser = async (req: Request, res: Response): Promise<void> => {
-    const { email, password } = req.body as { email?: string; password?: string };
+// Generate 6-digit OTP
+const generateOTP = (): string => {
+    return Math.floor(100000 + Math.random() * 900000).toString();
+};
 
-    if (!email || !password) {
-        res.status(400).json({ success: false, message: "Email and password required." });
-        return;
-    }
-
+// MODIFIED: Register User - No longer creates token immediately
+export const registerUser = async (req: Request, res: Response): Promise<void> => {
     try {
-        const user: any = await User.findOne({ email });
+        const { name, email, password } = req.body as {
+            name?: string;
+            email?: string;
+            password?: string;
+        };
+
+        // Validation
+        if (!name || !email || !password) {
+            res.status(400).json({ success: false, message: "All fields are required." });
+            return;
+        }
+
+        if (!validator.isEmail(email)) {
+            res.status(400).json({ success: false, message: "Invalid email." });
+            return;
+        }
+
+        if (password.length < 8) {
+            res.status(400).json({ success: false, message: "Password must be at least 8 characters." });
+            return;
+        }
+
+        // Check if user exists
+        const existingUser = await User.findOne({ email: email.toLowerCase() });
+        
+        if (existingUser) {
+            if (existingUser.isGoogleAuth) {
+                res.status(409).json({ 
+                    success: false, 
+                    message: "An account with this email already exists using Google Sign-In. Please use 'Continue with Google' to login." 
+                });
+                return;
+            }
+            
+            // Check if email is not verified
+            if (!existingUser.emailVerified) {
+                res.status(409).json({ 
+                    success: false, 
+                    message: "Email already registered but not verified. Please verify your email.",
+                    requiresVerification: true,
+                    email: existingUser.email
+                });
+                return;
+            }
+            
+            res.status(409).json({ 
+                success: false, 
+                message: "An account with this email already exists. Please login instead." 
+            });
+            return;
+        }
+
+        // Hash password
+        const hashed = await bcrypt.hash(password, SALT);
+
+        // Generate OTP
+        const verificationToken = generateOTP();
+        const verificationTokenExpiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+        // Create user (NOT verified yet)
+        const user = await User.create({ 
+            name, 
+            email: email.toLowerCase(), 
+            password: hashed,
+            isGoogleAuth: false,
+            emailVerified: false,
+            verificationToken,
+            verificationTokenExpiresAt,
+            otpAttempts: 0
+        });
+
+        // Send OTP email
+        const emailSent = await sendVerificationEmail(email, verificationToken);
+
+        if (!emailSent) {
+            res.status(500).json({ success: false, message: "Failed to send verification email. Please try again." });
+            return;
+        }
+
+        // Send response WITHOUT token (user must verify first)
+        res.status(201).json({
+            success: true,
+            message: "Registration successful! Please check your email for verification code.",
+            requiresVerification: true,
+            email: user.email,
+            userId: user._id.toString()
+        });
+
+    } catch (err: any) {
+        console.error("Registration error:", err);
+        res.status(500).json({ 
+            success: false, 
+            message: "Server error during registration.",
+            error: process.env.NODE_ENV === 'development' ? err.message : undefined
+        });
+    }
+};
+
+// NEW: Verify Email with OTP
+export const verifyEmail = async (req: Request, res: Response): Promise<void> => {
+    try {
+        const { email, code } = req.body as { email?: string; code?: string };
+
+        if (!email || !code) {
+            res.status(400).json({ success: false, message: "Email and verification code are required." });
+            return;
+        }
+
+        // Find user
+        const user = await User.findOne({
+            email: email.toLowerCase(),
+            verificationToken: code,
+            verificationTokenExpiresAt: { $gt: Date.now() }
+        });
+
         if (!user) {
-            res.status(401).json({ success: false, message: "Invalid credentials." });
+            res.status(400).json({ 
+                success: false, 
+                message: "Invalid or expired verification code." 
+            });
+            return;
+        }
+
+        // Check OTP attempts
+        if (user.otpAttempts >= 5) {
+            res.status(429).json({ 
+                success: false, 
+                message: "Too many failed attempts. Please request a new code." 
+            });
+            return;
+        }
+
+        // Mark as verified
+        user.emailVerified = true;
+        user.verificationToken = undefined;
+        user.verificationTokenExpiresAt = undefined;
+        user.otpAttempts = 0;
+        await user.save();
+
+        // Send welcome email
+        await sendWelcomeEmail(user.email, user.name);
+
+        // Generate JWT token NOW
+        const token = createToken(user._id.toString());
+
+        res.status(200).json({
+            success: true,
+            message: "Email verified successfully!",
+            token,
+            user: {
+                id: user._id.toString(),
+                name: user.name,
+                email: user.email,
+                picture: user.picture || '',
+                emailVerified: true
+            }
+        });
+
+    } catch (err: any) {
+        console.error("Email verification error:", err);
+        res.status(500).json({ 
+            success: false, 
+            message: "Server error during verification.",
+            error: process.env.NODE_ENV === 'development' ? err.message : undefined
+        });
+    }
+};
+
+// NEW: Resend OTP
+export const resendOTP = async (req: Request, res: Response): Promise<void> => {
+    try {
+        const { email } = req.body as { email?: string };
+
+        if (!email) {
+            res.status(400).json({ success: false, message: "Email is required." });
+            return;
+        }
+
+        const user = await User.findOne({ email: email.toLowerCase() });
+
+        if (!user) {
+            res.status(404).json({ success: false, message: "User not found." });
+            return;
+        }
+
+        if (user.emailVerified) {
+            res.status(400).json({ success: false, message: "Email is already verified." });
+            return;
+        }
+
+        // Generate new OTP
+        const verificationToken = generateOTP();
+        const verificationTokenExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+        user.verificationToken = verificationToken;
+        user.verificationTokenExpiresAt = verificationTokenExpiresAt;
+        user.otpAttempts = 0;
+        await user.save();
+
+        // Send OTP email
+        const emailSent = await sendVerificationEmail(email, verificationToken);
+
+        if (!emailSent) {
+            res.status(500).json({ success: false, message: "Failed to send email." });
+            return;
+        }
+
+        res.status(200).json({
+            success: true,
+            message: "Verification code sent to your email."
+        });
+
+    } catch (err: any) {
+        console.error("Resend OTP error:", err);
+        res.status(500).json({ 
+            success: false, 
+            message: "Server error.",
+            error: process.env.NODE_ENV === 'development' ? err.message : undefined
+        });
+    }
+};
+
+// MODIFIED: Login User - Check email verification
+export const loginUser = async (req: Request, res: Response): Promise<void> => {
+    try {
+        const { email, password } = req.body as { email?: string; password?: string };
+
+        if (!email || !password) {
+            res.status(400).json({ success: false, message: "Email and password are required." });
+            return;
+        }
+
+        const user = await User.findOne({ email: email.toLowerCase() });
+        
+        if (!user) {
+            res.status(401).json({ success: false, message: "Invalid email or password." });
+            return;
+        }
+
+        if (user.isGoogleAuth) {
+            res.status(401).json({ 
+                success: false, 
+                message: "Please use 'Continue with Google' to login." 
+            });
+            return;
+        }
+
+        if (!user.password) {
+            res.status(401).json({ success: false, message: "Invalid email or password." });
             return;
         }
 
         const match = await bcrypt.compare(password, user.password);
         if (!match) {
-            res.status(401).json({ success: false, message: "Invalid credentials." });
+            res.status(401).json({ success: false, message: "Invalid email or password." });
             return;
         }
 
-        const token = createToken(user._id as string);
-        res.json({success: true,token,user: { id: user._id as string, name: user.name as string, email: user.email as string },});
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ success: false, message: "Server error." });
+        // CHECK: Email verification
+        if (!user.emailVerified) {
+            res.status(403).json({ 
+                success: false, 
+                message: "Please verify your email first.",
+                requiresVerification: true,
+                email: user.email
+            });
+            return;
+        }
+
+        const token = createToken(user._id.toString());
+
+        res.json({
+            success: true,
+            token,
+            user: {
+                id: user._id.toString(),
+                name: user.name,
+                email: user.email,
+                picture: user.picture || '',
+                emailVerified: user.emailVerified
+            },
+        });
+
+    } catch (err: any) {
+        console.error("Login error:", err);
+        res.status(500).json({ 
+            success: false, 
+            message: "Server error during login.",
+            error: process.env.NODE_ENV === 'development' ? err.message : undefined
+        });
+    }
+};
+
+// Google Auth remains the same but marks email as verified
+export const googleAuth = async (req: Request, res: Response): Promise<void> => {
+    try {
+        const { code } = req.body;
+
+        if (!code) {
+            res.status(400).json({
+                success: false,
+                message: 'Authorization code is required',
+            });
+            return;
+        }
+
+        const tokenResponse = await axios.post<GoogleTokenResponse>(
+            'https://oauth2.googleapis.com/token',
+            {
+                code,
+                client_id: GOOGLE_CLIENT_ID,
+                client_secret: GOOGLE_CLIENT_SECRET,
+                redirect_uri: GOOGLE_REDIRECT_URI,
+                grant_type: 'authorization_code',
+            }
+        );
+
+        const { access_token } = tokenResponse.data;
+
+        const userInfoResponse = await axios.get<GoogleUserInfo>(
+            'https://www.googleapis.com/oauth2/v2/userinfo',
+            {
+                headers: {
+                    Authorization: `Bearer ${access_token}`,
+                },
+            }
+        );
+
+        const { email, name, picture, id: googleId } = userInfoResponse.data;
+
+        let user = await User.findOne({ email: email.toLowerCase() });
+
+        if (user) {
+            if (!user.isGoogleAuth && user.password) {
+                user.googleId = googleId;
+                user.isGoogleAuth = true;
+                user.emailVerified = true; // Google emails are verified
+                if (picture) user.picture = picture;
+                await user.save();
+            } else if (user.isGoogleAuth && !user.googleId) {
+                user.googleId = googleId;
+                user.emailVerified = true;
+                if (picture) user.picture = picture;
+                await user.save();
+            }
+        } else {
+            user = await User.create({
+                name,
+                email: email.toLowerCase(),
+                googleId,
+                picture,
+                isGoogleAuth: true,
+                emailVerified: true, // Google emails are pre-verified
+            });
+        }
+
+        const token = createToken(user._id.toString());
+
+        res.status(200).json({
+            success: true,
+            token,
+            user: {
+                id: user._id.toString(),
+                name: user.name,
+                email: user.email,
+                picture: user.picture || '',
+                emailVerified: user.emailVerified
+            },
+            message: 'Google authentication successful',
+        });
+
+    } catch (error: any) {
+        console.error("Google auth error:", error);
+        res.status(500).json({
+            success: false,
+            message: error.response?.data?.error_description || 'Google authentication failed',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
     }
 };
 
 export const getCurrentUser = async (req: Request, res: Response): Promise<void> => {
     try {
         const userId = req.user?.id;
+        
         if (!userId) {
             res.status(401).json({ success: false, message: "Not authorized" });
             return;
         }
 
-        const user = await User.findById(userId).select("name email");
+        const user = await User.findById(userId).select("name email picture isGoogleAuth emailVerified");
+        
         if (!user) {
             res.status(404).json({ success: false, message: "User not found." });
             return;
         }
 
-        res.json({ success: true, user });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ success: false, message: "Server error." });
-    }
-};
+        res.json({ 
+            success: true, 
+            user: {
+                id: user._id.toString(),
+                name: user.name,
+                email: user.email,
+                picture: user.picture || '',
+                isGoogleAuth: user.isGoogleAuth,
+                emailVerified: user.emailVerified
+            }
+        });
 
-export const updateProfile = async (req: Request, res: Response): Promise<void> => {
-    const { name, email } = req.body as { name?: string; email?: string };
-
-    if (!name || !email || !validator.isEmail(email)) {
-        res.status(400).json({ success: false, message: "Valid name and email required." });
-        return;
-    }
-
-    try {
-        const userId = req.user?.id;
-        if (!userId) {
-            res.status(401).json({ success: false, message: "Not authorized" });
-            return;
-        }
-
-        const exists = await User.findOne({ email, _id: { $ne: userId } });
-        if (exists) {
-            res.status(409).json({ success: false, message: "Email already in use by another account." });
-            return;
-        }
-
-        const user = await User.findByIdAndUpdate(
-            userId,
-            { name, email },
-            { new: true, runValidators: true, select: "name email" }
-        );
-
-        res.json({ success: true, user });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ success: false, message: "Server error." });
-    }
-};
-
-export const updatePassword = async (req: Request, res: Response): Promise<void> => {
-    const { currentPassword, newPassword } = req.body as {
-        currentPassword?: string;
-        newPassword?: string;
-    };
-
-    if (!currentPassword || !newPassword || newPassword.length < 8) {
-        res.status(400).json({ success: false, message: "Passwords invalid or too short." });
-        return;
-    }
-
-    try {
-        const userId = req.user?.id;
-        if (!userId) {
-            res.status(401).json({ success: false, message: "Not authorized" });
-            return;
-        }
-
-        const user: any = await User.findById(userId).select("password");
-        if (!user) {
-            res.status(404).json({ success: false, message: "User not found." });
-            return;
-        }
-
-        const match = await bcrypt.compare(currentPassword, user.password);
-        if (!match) {
-            res.status(401).json({ success: false, message: "Current password incorrect." });
-            return;
-        }
-
-        user.password = await bcrypt.hash(newPassword, 10);
-        await user.save();
-
-        res.json({ success: true, message: "Password changed." });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ success: false, message: "Server error." });
+    } catch (err: any) {
+        console.error("Get current user error:", err);
+        res.status(500).json({ 
+            success: false, 
+            message: "Server error.",
+            error: process.env.NODE_ENV === 'development' ? err.message : undefined
+        });
     }
 };

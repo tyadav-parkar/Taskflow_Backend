@@ -3,17 +3,24 @@ import {
     registerUser,
     loginUser,
     getCurrentUser,
-    updateProfile,
-    updatePassword,
+    googleAuth,
+    verifyEmail,     // NEW
+    resendOTP,       // NEW
 } from '../controllers/user.controller.js';
 import authMiddleware from '../middleware/auth.js';
 
 const userRouter = express.Router();
 
+// Authentication routes
 userRouter.post('/register', registerUser);
 userRouter.post('/login', loginUser);
-userRouter.get('/me', authMiddleware,getCurrentUser);
-userRouter.put('/profile', authMiddleware, updateProfile);
-userRouter.put('/password', authMiddleware, updatePassword);
+userRouter.post('/google-auth', googleAuth);
+
+// Email verification routes (NEW)
+userRouter.post('/verify-email', verifyEmail);
+userRouter.post('/resend-otp', resendOTP);
+
+// Protected routes
+userRouter.get('/profile', authMiddleware, getCurrentUser);
 
 export default userRouter;
